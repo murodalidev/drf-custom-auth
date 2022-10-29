@@ -1,9 +1,10 @@
+from django.contrib.auth.hashers import check_password
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from rest_framework.exceptions import AuthenticationFailed
 
-from .models import User
+from ...models import Account
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -11,8 +12,8 @@ class RegisterSerializer(serializers.ModelSerializer):
     password2 = serializers.CharField(min_length=6, max_length=68, write_only=True)
 
     class Meta:
-        model = User
-        fields = ('username', 'password', 'password2')
+        model = Account
+        fields = ('username', 'role', 'password', 'password2')
 
     def validate(self, attrs):
         password = attrs.get('password')
@@ -24,24 +25,27 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         del validated_data['password2']
-        return User.objects.create_user(**validated_data)
+        return Account.objects.create_user(**validated_data)
 
 
 class LoginSerializer(serializers.ModelSerializer):
     username = serializers.CharField(max_length=100, required=True)
     password = serializers.CharField(max_length=68, write_only=True)
+    tokens = serializers.SerializerMethodField(read_only=True)
+
+    def get_tokens(self, obj):
+        username = obj.get('username')
+        tokens = Account.objects.get(username=username).tokens
+        return tokens
 
     class Meta:
-        model = User
-        fields = ('username', 'password')
-        extra_kwargs = {
-            'role': {'read_only': True}
-        }
+        model = Account
+        fields = ('username', 'tokens', 'password')
 
     def validate(self, attrs):
-        email = attrs.get('email')
+        username = attrs.get('username')
         password = attrs.get('password')
-        user = authenticate(email=email, password=password)
+        user = authenticate(username=username, password=password)
         if not user:
             raise AuthenticationFailed({
                 'message': 'Username or password is not correct'
@@ -50,33 +54,29 @@ class LoginSerializer(serializers.ModelSerializer):
             raise AuthenticationFailed({
                 'message': 'Account disabled'
             })
-        if not user.is_verified:
-            raise AuthenticationFailed({
-                'message': 'Email is not verified'
-            })
 
         data = {
-            'success': True,
             'username': user.username,
-            'tokens': user.tokens,
         }
         return data
 
 
-class UserSerializer(serializers.ModelSerializer):
+class AccountUpdateSerializer(serializers.ModelSerializer):
+    role = serializers.SerializerMethodField(read_only=True)
+
+    def get_role(self, obj):
+        return obj.get_role_display()
 
     class Meta:
-        model = User
-        fields = ('id', 'full_name', 'username', 'phone', 'image', 'team_name')
-        extra_kwargs = {
-            'image': {'read_only': True}
-        }
+        model = Account
+        fields = ('id', 'full_name', 'username', 'image_url', 'email', 'phone', 'role')
 
 
-class UserOwnImageUpdateSerializer(serializers.ModelSerializer):
+
+class AccountOwnImageUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
-        model = User
+        model = Account
         fields = ('image', )
 
 
@@ -85,18 +85,22 @@ class SetNewPasswordSerializer(serializers.ModelSerializer):
     password2 = serializers.CharField(min_length=6, max_length=64, write_only=True)
 
     class Meta:
-        model = User
+        model = Account
         fields = ('password', 'password2')
 
     def validate(self, attrs):
         password = attrs.get('password')
         password2 = attrs.get('password2')
-        request = user =  self.context['request']
+        request = self.context['request']
         user = request.user
+        current_password = user.password
         if password != password2:
             raise serializers.ValidationError({'success': False, 'message': 'Password did not match, '
                                                                             'please try again new'})
+
+        if check_password(password, current_password):
+            raise serializers.ValidationError({'success': False, 'message': 'New password should not similar to current password'})
+
         user.set_password(password)
         user.save()
-        return user
-
+        return attrs
