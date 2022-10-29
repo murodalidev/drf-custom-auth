@@ -1,43 +1,34 @@
 from django.db.models import Q
 from rest_framework import generics, status
-from rest_framework.views import APIView
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
-from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
-from django.urls import reverse
-from django.conf import settings
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
-import jwt
-from django.contrib.auth.tokens import PasswordResetTokenGenerator
-from django.utils.encoding import smart_str, force_str, smart_bytes, DjangoUnicodeDecodeError
-from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
-from ...models import User
-from .serializer import RegisterSerializer, LoginSerializer, \
-     SetNewPasswordSerializer, UserSerializer, UserOwnImageUpdateSerializer
-from .permissions import IsOwnerForUser
+
+from apps.accounts.api.v1.permissions import IsOwnUserOrReadOnly
+from apps.accounts.api.v1.serializers import RegisterSerializer, LoginSerializer, AccountUpdateSerializer, \
+    AccountOwnImageUpdateSerializer, SetNewPasswordSerializer
+from apps.accounts.models import Account
 
 
-class UserRegisterView(generics.GenericAPIView):
-    # http://127.0.0.1:8000/user/v1/register/
+class AccountRegisterView(generics.GenericAPIView):
+    # http://127.0.0.1:8000/api/accounts/v1/register/
     serializer_class = RegisterSerializer
-    permission_classes = (AllowAny, )
 
     def post(self, request):
         user = request.data
         serializer = self.serializer_class(data=user)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-
         user_data = serializer.data
-        user_data['tokens'] = str(token)
+        username = serializer.data.get('username')
+        tokens = Account.objects.get(username=username).tokens
+        user_data['tokens'] = tokens
         return Response({'success': True, 'data': user_data}, status=status.HTTP_201_CREATED)
 
 
+
 class LoginView(generics.GenericAPIView):
-    # http://127.0.0.1:8000/user/v1/login/
+    # http://127.0.0.1:8000/api/accounts/v1/login/
     serializer_class = LoginSerializer
-    permission_classes = (AllowAny, )
 
     def post(self, request):
         serializer = self.serializer_class(data=request.data)
@@ -45,61 +36,23 @@ class LoginView(generics.GenericAPIView):
         return Response({'success': True, 'data': serializer.data}, status=status.HTTP_200_OK)
 
 
-class GetUserView(generics.RetrieveAPIView):
-    # http://127.0.0.1:8000/user/v1/get-user/
-    permission_classes = (IsAuthenticated, )
-    serializer_class = UserUpdateSerializer
+class AccountView(generics.RetrieveAPIView):
+    # http://127.0.0.1:8000/api/accounts/v1/get-account/
+    permission_classes = (IsOwnUserOrReadOnly, IsAuthenticated, )
+    serializer_class = AccountUpdateSerializer
 
     def get(self, request, *args, **kwargs):
         user = request.user
-        query = User.objects.get(id=user.id)
+        query = Account.objects.get(id=user.id)
         serializer = self.get_serializer(query)
         return Response({'success': True, 'data': serializer.data}, status=status.HTTP_200_OK)
 
 
-class SetNewPasswordView(generics.GenericAPIView):
-    # http://127.0.0.1:8000/user/v1/password-change-complete/
-    serializer_class = SetNewPasswordSerializer
-    permission_classes = (AllowAny, )
-
-    def patch(self, request, *args, **kwargs):
-        serializer = self.serializer_class(data=request.data)
-        if serializer.is_valid():
-            return Response({'success': True, 'message': 'Successfully changed password'}, status=status.HTTP_200_OK)
-        return Response({'success': False, 'message': 'Credentials is invalid'}, status=status.HTTP_406_NOT_ACCEPTABLE)
-
-
-class UserListView(generics.ListAPIView):
-    # http://127.0.0.1:8000/user/v1/list/
-    serializer_class = UserUpdateSerializer
-    permission_classes = (IsAuthenticated, )
-
-    def get_queryset(self):
-        q = self.request.GET.get('q')
-        
-        q_condition = Q()
-        if q:
-            q_condition = (Q(subject__icontains=q) | Q(phone=q))
-
-        queryset = User.objects.filter(q_condition, team_condition, date_condition)
-
-        return queryset
-
-    def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
-        if queryset:
-            serializer = self.get_serializer(queryset, many=True)
-            count = queryset.count()
-            return Response({'success': True, 'data': serializer.data, 'count': count}, status=status.HTTP_200_OK)
-        else:
-            return Response({'success': False, 'data': 'queryset did not matching'}, status=status.HTTP_404_NOT_FOUND)
-
-
-class UserUpdateView(generics.RetrieveUpdateAPIView):
-    # http://127.0.0.1:8000/user/v1/update/<id>/
-    serializer_class = UserUpdateSerializer
-    queryset = User.objects.all()
-    permission_classes = (IsAdminUser, )
+class AccountRetrieveUpdateView(generics.RetrieveUpdateAPIView):
+    # http://127.0.0.1:8000/api/accounts/v1/retrieve-update/<id>/
+    serializer_class = AccountUpdateSerializer
+    queryset = Account.objects.all()
+    permission_classes = (IsOwnUserOrReadOnly, IsAuthenticated)
 
     def get(self, request, *args, **kwargs):
         query = self.get_object()
@@ -115,31 +68,70 @@ class UserUpdateView(generics.RetrieveUpdateAPIView):
         if serializer.is_valid():
             serializer.save()
             return Response({'success': True, 'data': serializer.data}, status=status.HTTP_202_ACCEPTED)
-        else:
-            return Response({'success': False, 'message': 'credentials is invalid'},
-                            status=status.HTTP_406_NOT_ACCEPTABLE)
+        return Response({'success': False, 'message': 'credentials is invalid'}, status=status.HTTP_404_NOT_FOUND)
 
 
-class UserOwnImageUpdateView(generics.RetrieveUpdateAPIView):
-    # http://127.0.0.1:8000/user/v1/update-own-image/<id>/
-    serializer_class = UserOwnImageUpdateSerializer
-    queryset = User.objects.all()
-    permission_classes = (IsOwnerForUser, )
+class AccountOwnImageUpdateView(generics.RetrieveUpdateAPIView):
+    # http://127.0.0.1:8000/api/accounts/v1/image-retrieve-update/<id>/
+    serializer_class = AccountOwnImageUpdateSerializer
+    queryset = Account.objects.all()
+    permission_classes = (IsOwnUserOrReadOnly, IsAuthenticated)
 
     def get(self, request, *args, **kwargs):
         query = self.get_object()
         if query:
             serializer = self.get_serializer(query)
             return Response({'success': True, 'data': serializer.data}, status=status.HTTP_200_OK)
-        else:
-            return Response({'success': False, 'message': 'query did not match'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': False, 'message': 'query does not match'}, status=status.HTTP_404_NOT_FOUND)
 
     def put(self, request, *args, **kwargs):
         obj = self.get_object()
         serializer = self.get_serializer(obj, data=request.data)
         if serializer.is_valid():
             serializer.save()
-            return Response({'success': True, 'data': serializer.data}, status=status.HTTP_202_ACCEPTED)
-        else:
-            return Response({'success': False, 'message': 'Credentials is invalid'},
-                            status=status.HTTP_406_NOT_ACCEPTABLE)
+            return Response({'success': True, 'data': serializer.data}, status=status.HTTP_200_OK)
+        return Response({'success': False, 'message': 'Credentials is invalid'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AccountListView(generics.ListAPIView):
+    # http://127.0.0.1:8000/api/accounts/v1/list/
+    serializer_class = AccountUpdateSerializer
+    queryset = Account.objects.all()
+    permission_classes = (IsAuthenticated,)
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        q = self.request.GET.get('q')
+        role = self.request.GET.get('role')
+
+        q_condition = Q()
+        if q:
+            q_condition = Q(full_name__icontains=q) | Q(phone__icontains=q) | Q(username__icontains=q) | Q(email__icontains=q)
+
+        role_condition = Q()
+        if role:
+            role_condition = Q(role__exact=role)
+        queryset = qs.filter(q_condition, role_condition)
+
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        if queryset:
+            serializer = self.get_serializer(queryset, many=True)
+            count = queryset.count()
+            return Response({'success': True, 'count': count, 'data': serializer.data}, status=status.HTTP_200_OK)
+        return Response({'success': False, 'data': 'queryset does not match'}, status=status.HTTP_404_NOT_FOUND)
+
+
+class SetNewPasswordView(generics.UpdateAPIView):
+    # http://127.0.0.1:8000/api/accounts/v1/set-password/
+    serializer_class = SetNewPasswordSerializer
+    permission_classes = (IsOwnUserOrReadOnly, IsAuthenticated)
+
+    def put(self, request, *args, **kwargs):
+        serializer = self.serializer_class(data=request.data, context={"request": self.request})
+        if serializer.is_valid(raise_exception=True):
+            return Response({'success': True, 'message': 'Successfully changed password'}, status=status.HTTP_200_OK)
+        return Response({'success': False, 'message': 'Credentials is invalid'}, status=status.HTTP_400_BAD_REQUEST)
+
